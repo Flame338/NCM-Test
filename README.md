@@ -63,9 +63,56 @@ python -m ncm_toy sample --gen checkpoints/ncm_cond.pt --prefix "fox liked bird"
 python -m ncm_toy eval --gen checkpoints/ncm_lm.pt --ar checkpoints/ar_lm.pt
 python -m ncm_toy eval --gen checkpoints/ncm_cond.pt --ar checkpoints/ar_cond.pt --cfg 2
 
-# retrain everything (≈1h on 4 CPU cores; see `python -m ncm_toy <cmd> --help`)
+# retrain everything (~1.5 h on 4 CPU cores with the jobs run in parallel; see `python -m ncm_toy <cmd> --help`)
 python -m ncm_toy train-all
 ```
+
+## What the checkpoints in `checkpoints/` actually do
+
+Single run, seed 0, 512 samples per row, temperature 1.0 unless noted. Tokenizer: 1,500 steps; generators and
+baselines: 3,000 steps each, ~1.8M trainable parameters each.
+
+**Tokenizer** (`python -m ncm_toy recon`, 500 held-out sentences). Reconstruction from only the first *k* levels:
+
+| levels used | codes | char accuracy | exact match |
+|---|---|---|---|
+| 1 | 1 | 0.664 | 0.000 |
+| 2 | 3 | 0.964 | 0.656 |
+| 3 | 7 | 0.992 | 0.910 |
+| 6 | 63 | 1.000 | 0.992 |
+
+One code gives the rough shape of the sentence (`the small dox saw a o d f.`); the first two levels give
+almost everything. Most information sits in the coarse levels, which is the hierarchy doing its job, though
+it also means the last levels add little on this easy data.
+
+**Generation** (`python -m ncm_toy eval ...`):
+
+| model | task | forward passes | valid | novel* | unique | faithful | sec |
+|---|---|---|---|---|---|---|---|
+| NCM | lm | **6** | 0.850 | 0.082 | 0.969 | – | 1.9 |
+| AR | lm | 32 | **0.996** | 0.162 | 0.977 | – | 4.3 |
+| NCM | cond, cfg 0 | **6** | 0.861 | 0.090 | 0.979 | 0.857 | 2.9 |
+| NCM | cond, cfg 2 | 6 | 0.846 | 0.084 | 0.977 | 0.844 | 5.3 |
+| NCM | cond, cfg 4 | 6 | 0.783 | 0.080 | 0.973 | 0.783 | 5.0 |
+| NCM | cond, T=0.6, cfg 0 | 6 | 0.906 | 0.084 | 0.953 | 0.904 | 2.6 |
+| AR | cond | 32 | **1.000** | 0.146 | 0.973 | **0.998** | 9.0 |
+
+\* "novel" counts valid, unseen sentences over *all* samples. The held-out split is 15% of the grammar, so
+a model that samples the grammar uniformly would score about 0.15; the AR baseline is near that, NCM is lower.
+
+How to read this:
+
+* **The mechanism works but this toy NCM is less accurate than the baseline.** It makes 6 forward passes
+  instead of 32 (and ran about 2x faster even though the AR baseline has no KV cache), but 85-90% of its
+  samples parse versus ~100% for AR. The common failures are fine-level mismatches such as `a fox liked a bibird`.
+  This is a 3,000-step, one-seed run on a tiny model; I did not tune it, so I can't say how much of the gap
+  is the method and how much is under-training.
+* **Level 0 and 1 are the hard part.** During training, level-0/1 code accuracy stays at ~0.05-0.4 while levels 2-5
+  reach 0.85-1.0: choosing the gist is a high-entropy decision, so those codes are close to a sample from a
+  distribution, not a deterministic answer.
+* **CFG did not help here.** Guidance at 2 and 4 lowered validity and faithfulness. Cause is unknown;
+  the guidance ramp or the 10% condition-dropout rate may not suit a toy model, and I have not investigated.
+* Lower temperature helped the conditional model (0.86 -> 0.91 valid) and did little for the unconditional one.
 
 ## Things worth poking at
 
@@ -75,8 +122,10 @@ python -m ncm_toy train-all
   conservatively, let details vary (or the reverse).
 * **CFG ramp.** `--cfg 0|1|2|4` on the conditional model; watch `faithful` vs. `unique`.
 * **Hierarchy shape.** Edit `scales=` / `codebook_size=` in `TextVQVAE` (e.g. `(1,4,16,32)`, or 8 codes at level 0).
-  Remove the partial-decode loss (`n_partial=0` in `TextVQVAE.forward`) and watch coarse levels collapse
-  (level-0 codebook perplexity → 1): the finest level alone can already spell out characters.
+  The partial-decode loss (`n_partial` in `TextVQVAE.forward`) is what pushes information into the coarse levels.
+  In an early 60-step smoke run with a weaker version of it, the level-0 codebook collapsed to one code
+  (perplexity 1.00), because the finest level alone can already spell out characters. I did not run a
+  converged ablation, so treat `n_partial=0` as an experiment to try rather than an established result.
 * **Swap the data.** `ncm_toy/data.py` is ~80 lines; any fixed-length char corpus works if you keep `SEQ_LEN`
   a power of two (or change `scales`).
 
