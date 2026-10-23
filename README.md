@@ -5,10 +5,10 @@ A small, CPU-friendly re-implementation of the core idea of **Next-Concept Model
 [reference code](https://github.com/HazyResearch/ncm)) for experimenting with the mechanism —
 not for reproducing the paper's numbers.
 
-> **Provenance caveat.** `arxiv.org` was unreachable from the sandbox this was built in, so I could not read
-> the PDF. The design below follows the public reference repo (`models/vqvae.py`, `quant.py`, `next_concept.py`)
-> and secondary summaries of the paper. Details marked *(toy)* are my simplifications; anything I could not
-> confirm from the code is not claimed here. Check against the paper before relying on specifics.
+> **Provenance.** The first version was built from the public reference repo and secondary summaries because
+> `arxiv.org` was unreachable. I later read the paper PDF and compared it with this code (Sec. 3, App. C and F).
+> The section "Closing the accuracy gap" below records what that comparison changed and what did not work.
+> This is still a small re-implementation, not a reproduction: details marked *(toy)* are my simplifications.
 
 ## The idea in one picture
 
@@ -31,7 +31,7 @@ stage 2: a transformer predicts level k's codes *all at once* given levels < k  
 |---|---|---|
 | Tokenizer | transformer enc/dec, **multiscale residual VQ**, scales 1·2·4·8·16·32, 64 codes/level, EMA codebooks + dead-code restart, conv `phi` per level, pooled residual / interpolated upsample | same family; far larger, 16-level config appears in the repo's example |
 | Generator input at level k | running reconstruction `z_hat` pooled to `n_k` positions (level 0: learned start token) | `get_next_autoregressive_input`, VAR-style |
-| Attention | block-causal over levels, parallel within a level; prefix attends only to itself, targets attend to prefix | `attn_pattern=block_causal` and prefix mask in `next_concept.py` |
+| Attention | the shipped checkpoints are block-causal; `--attn block_diagonal` (new default for training, and what the paper uses, App. F.2.1) lets each level see only itself plus the prefix, and sampling then runs one level block per step | paper: block-diagonal; repo also has block-causal |
 | Heads | one per level over that level's codebook | same |
 | Guidance | classifier-free guidance, strength ramped with depth `t_k = cfg·k/(K-1)`, `(1+t)·cond − t·uncond` | same formula as the reference sampler |
 | Training objective | per-level cross-entropy on codes, teacher-forced *(toy: loss code for the real model isn't in the files I read)* | — |
@@ -61,6 +61,7 @@ python -m ncm_toy recon                               # how much do the first k 
 python -m ncm_toy sample -n 8 --trace                 # watch a sentence sharpen level by level
 python -m ncm_toy sample --gen checkpoints/ncm_cond.pt --prefix "fox liked bird" -n 6 --cfg 2
 python -m ncm_toy eval --gen checkpoints/ncm_lm.pt --ar checkpoints/ar_lm.pt
+python -m ncm_toy eval --gen checkpoints/ncm_lm.pt --verify 1 --candidates 16   # cycle-consistency rejection
 python -m ncm_toy eval --gen checkpoints/ncm_cond.pt --ar checkpoints/ar_cond.pt --cfg 2
 
 # retrain everything (~1.5 h on 4 CPU cores with the jobs run in parallel; see `python -m ncm_toy <cmd> --help`)
@@ -114,6 +115,62 @@ How to read this:
   the guidance ramp or the 10% condition-dropout rate may not suit a toy model, and I have not investigated.
 * Lower temperature helped the conditional model (0.86 -> 0.91 valid) and did little for the unconditional one.
 
+## Closing the accuracy gap (NCM vs. the AR baseline)
+
+The shipped NCM is ~83% valid vs ~100% for AR at 6 vs 32 forward passes. I read the paper and tried its
+suggestions, plus a diagnosis-driven fix. All numbers: unconditional task, 1,024 samples, single seed, 3,000-step
+generators, so differences of ~3 points are noise.
+
+**What did not help (and one that hurt badly)**
+
+| change | valid | note |
+|---|---|---|
+| shipped model (block-causal, no corruption) | 82.8% | reference |
+| block-diagonal attention (paper's choice) | 81.6% | no accuracy change here; sampling is cheaper |
+| conditioning corruption, mean rate 0.25 / 0.5 | 33% / 4% | paper's headline remedy; **destroyed generation** in this toy |
+| dropout 0.1 + weight decay 0.1 (paper values) | 82.5% | held-out code accuracy barely moved |
+| dropout 0.2 + weight decay 0.1 | 80.6% | |
+| dropout + corruption 0.1 | 57-61% | even mild corruption hurts |
+| per-level temperature (argmax on fine levels) | 80-85% | all within noise |
+
+Why corruption fails here (partly confident, partly a guess): the toy's first two levels carry almost all the
+information (~8.8 of ~9.0 nats per sentence), and randomizing even one coarse code wrecks the sentence (5-10% valid)
+while the targets stay clean, so the model learns to hedge and ignore its conditioning. The paper's tokenizer has 12
+levels with 4,096 codes each, so a swapped code costs far less. The exact "shifted linear" corruption schedule is
+unspecified, so mine may also differ from theirs.
+
+**Where the errors come from.** Fixing the first *f* levels to the true codes of a held-out sentence and sampling
+the rest (`generate(given=...)`): f=0 81%, f=2 90%, f=3 92%, f=4 95%, f=5 98%, f=6 99.5%. Errors are spread across
+levels: the two codes of level 1 are sampled independently, so combinations that no real sentence produces get
+through, and those off-support prefixes then reach finer levels that never saw such inputs. Separately, the
+generator predicts codes of *held-out* sentences far worse than training ones (0.67-0.73 vs 0.90-0.99 at levels
+2-5), and regularization did not close that gap, so the codes behave partly like a hash of the sentence.
+
+**What did help: cycle-consistency rejection (no retraining, no extra generator passes).** Found by an Opus
+design review of this code against the paper, then re-measured here. At a chosen level, draw `--candidates`
+code sets from the *same* logits, decode the partial reconstruction with the frozen tokenizer, re-encode it, and
+keep the first candidate whose codes for levels 0..k survive the round trip. This rejects off-support prefixes.
+
+| model | verify | candidates | valid | novel | unique | faithful |
+|---|---|---|---|---|---|---|
+| NCM lm | none | – | 82.8% | 8.1% | 95.1% | – |
+| NCM lm | level 1 | 4 / 16 / 32 | 91.6% / 92.9% / 92.9% | 10.2% / 7.7% / 7.8% | ~94% | – |
+| NCM lm | levels 1-5 | 8 | 93.0% | 8.8% | 92.3% | – |
+| NCM cond | none | – | 85.4% | 8.6% | 94.6% | 84.8% |
+| NCM cond | level 1 | 16 | 94.7% | 9.0% | 93.8% | 94.4% |
+
+```bash
+python -m ncm_toy eval --gen checkpoints/ncm_lm.pt --verify 1 --candidates 16
+python -m ncm_toy sample --gen checkpoints/ncm_cond.pt --prefix "fox liked bird" --verify 1 --candidates 16
+```
+
+Caveats: the generator still makes 6 forward passes, but each verified level adds tokenizer encode + decode on
+`B x candidates` sequences, which the paper's speed numbers do not include. I did not measure that cost cleanly
+(the CPU was shared with training), so do not read the NFE column as the whole cost. The remaining gap to AR is
+about 5-7 points. The most promising untried idea is a tokenizer redesign so that the high-entropy decisions are
+made one code at a time (e.g. scales `1,1,1,2,4,8,16,32`, paper-style nested dropout, smaller fine codebooks); that
+needs retraining both stages.
+
 ## Things worth poking at
 
 * **Levels as a dial.** `recon` shows quality vs. number of levels. Truncating generation after level *k* gives a
@@ -156,3 +213,5 @@ tests/                shape, causality, NFE and frozen-tokenizer tests
   Compare **forward-pass counts (NFE)**, which are exact, more than seconds.
 * No diffusion-LM baseline is included.
 * Tiny models, one seed, short training — expect noisy numbers.
+* The shipped checkpoints predate the paper-derived options (block-causal, no corruption, dropout 0); the newer
+  variants I trained were not better, so they are not shipped.
