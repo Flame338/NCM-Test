@@ -173,16 +173,18 @@ class NextConceptGenerator(nn.Module):
     # -- sampling -------------------------------------------------------------------------
     @torch.no_grad()
     def generate(self, n=None, prefix=None, temperature=1.0, top_k=0, top_p=1.0, cfg=0.0,
-                 level_temps=None):
+                 level_temps=None, given=None):
         """Coarse-to-fine sampling.  Exactly `n_levels` transformer forward passes.
 
         cfg: classifier-free guidance scale; as in the reference code the strength ramps
              linearly with depth, t_k = cfg * k / (n_levels-1), logits = (1+t)*cond - t*uncond.
+        given: optional list of code tensors for the first levels (e.g. from `encode_codes`); those levels
+             are fixed instead of sampled -- "keep the gist, resample the details" (paper App. H).
         Returns dict(tokens, codes, trace) where trace[k] is the text decoded after level k.
         """
         self.eval()
         dev = self.start.device
-        B = prefix.shape[0] if prefix is not None else n
+        B = prefix.shape[0] if prefix is not None else (n if n is not None else given[0].shape[0])
         use_cfg = cfg > 0 and self.P > 0
         if use_cfg:
             prefix = torch.cat([prefix, torch.zeros_like(prefix)], 0)
@@ -206,7 +208,7 @@ class NextConceptGenerator(nn.Module):
                 cond, unc = lg[:B], lg[B:]
                 lg = (1 + t) * cond - t * unc
             temp = level_temps[k] if level_temps is not None else temperature
-            idx = sample_logits(lg, temp, top_k, top_p)
+            idx = given[k] if given is not None and k < len(given) else sample_logits(lg, temp, top_k, top_p)
             z_hat = self.vq.add_level(k, idx, z_hat)
             hats.append(z_hat)
             codes.append(idx)

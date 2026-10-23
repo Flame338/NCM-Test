@@ -20,15 +20,15 @@ def n_params(m, trainable_only=True):
     return sum(p.numel() for p in m.parameters() if p.requires_grad or not trainable_only)
 
 
-def _opt(params, lr, steps, warmup=100):
-    opt = torch.optim.AdamW(params, lr=lr, betas=(0.9, 0.98), weight_decay=0.01)
+def _opt(params, lr, steps, warmup=100, wd=0.01):
+    opt = torch.optim.AdamW(params, lr=lr, betas=(0.9, 0.98), weight_decay=wd)
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min(1.0, (s + 1) / warmup) * (0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * min(s / steps, 1.0)))))
     return opt, sched
 
 
-def _loop(model, params, step_fn, steps, lr, log_every, tag):
-    opt, sched = _opt(params, lr, steps)
+def _loop(model, params, step_fn, steps, lr, log_every, tag, wd=0.01):
+    opt, sched = _opt(params, lr, steps, wd=wd)
     t0 = time.time()
     for s in range(1, steps + 1):
         model.train()
@@ -76,7 +76,8 @@ def load_vq(path):
     m = TextVQVAE(**ck["cfg"]); m.load_state_dict(ck["state"]); return m.eval()
 
 
-def train_gen(vq_path, out, task="lm", steps=3000, bs=128, lr=1e-3, seed=0, log_every=250, **model_kw):
+def train_gen(vq_path, out, task="lm", steps=3000, bs=128, lr=1e-3, seed=0, log_every=250, wd=0.01,
+              **model_kw):
     set_seed(seed)
     train, _ = data.load_splits(task)
     vq = load_vq(vq_path)
@@ -91,7 +92,7 @@ def train_gen(vq_path, out, task="lm", steps=3000, bs=128, lr=1e-3, seed=0, log_
         r = model(prefix=train.p[i] if P else None, idxs=[c[i] for c in codes])
         return dict(loss=r["loss"], ce=r["per_level"], acc=r["acc"])
 
-    _loop(model, model.trainable_parameters(), step, steps, lr, log_every, f"ncm-{task}")
+    _loop(model, model.trainable_parameters(), step, steps, lr, log_every, f"ncm-{task}", wd=wd)
     save(out, "ncm", model, task=task, vq_cfg=vq.cfg)
     return model
 
