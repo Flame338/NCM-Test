@@ -171,15 +171,32 @@ class NextConceptGenerator(nn.Module):
         return dict(loss=(w * l * pl).sum(), per_level=pl.detach(), acc=torch.stack(accs).detach())
 
     # -- sampling -------------------------------------------------------------------------
+    def _verified_sample(self, lg, z_hat, codes, k, temp, top_k, top_p, M):
+        B = lg.shape[0]
+        cand = sample_logits(lg[:, None].expand(B, M, *lg.shape[1:]), temp, top_k, top_p)  # (B, M, n_k)
+        zc = self.vq.add_level(k, cand.reshape(B * M, -1), z_hat.repeat_interleave(M, 0))
+        re = self.vq_model.encode(self.vq_model.decode_z(zc).argmax(-1))[0]
+        ok = (re[k].view(B, M, -1) == cand).all(-1)
+        for j in range(k):
+            ok &= (re[j].view(B, M, -1) == codes[j][:, None]).all(-1)
+        pick = torch.where(ok.any(1), ok.float().argmax(1), torch.zeros(B, dtype=torch.long, device=lg.device))
+        return cand[torch.arange(B, device=lg.device), pick]
+
     @torch.no_grad()
     def generate(self, n=None, prefix=None, temperature=1.0, top_k=0, top_p=1.0, cfg=0.0,
-                 level_temps=None, given=None):
+                 level_temps=None, given=None, verify_levels=(), n_candidates=8):
         """Coarse-to-fine sampling.  Exactly `n_levels` transformer forward passes.
 
         cfg: classifier-free guidance scale; as in the reference code the strength ramps
              linearly with depth, t_k = cfg * k / (n_levels-1), logits = (1+t)*cond - t*uncond.
         given: optional list of code tensors for the first levels (e.g. from `encode_codes`); those levels
              are fixed instead of sampled -- "keep the gist, resample the details" (paper App. H).
+        verify_levels / n_candidates: cycle-consistency rejection.  At each listed level, draw
+             `n_candidates` code sets from the *same* logits (no extra generator pass), decode the partial
+             reconstruction with the frozen tokenizer, re-encode that text, and keep the first candidate
+             whose codes for levels 0..k survive the round trip (else the first draw).  Independent
+             sampling inside a level can land on code combinations no real sentence produces; this
+             rejects them.  Costs tokenizer encode+decode on B*n_candidates sequences per checked level.
         Returns dict(tokens, codes, trace) where trace[k] is the text decoded after level k.
         """
         self.eval()
@@ -208,7 +225,12 @@ class NextConceptGenerator(nn.Module):
                 cond, unc = lg[:B], lg[B:]
                 lg = (1 + t) * cond - t * unc
             temp = level_temps[k] if level_temps is not None else temperature
-            idx = given[k] if given is not None and k < len(given) else sample_logits(lg, temp, top_k, top_p)
+            if given is not None and k < len(given):
+                idx = given[k]
+            elif k in verify_levels and n_candidates > 1:
+                idx = self._verified_sample(lg, z_hat, codes, k, temp, top_k, top_p, n_candidates)
+            else:
+                idx = sample_logits(lg, temp, top_k, top_p)
             z_hat = self.vq.add_level(k, idx, z_hat)
             hats.append(z_hat)
             codes.append(idx)

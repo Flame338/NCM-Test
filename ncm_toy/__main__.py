@@ -58,7 +58,8 @@ def cmd_sample(a):
         prefix = torch.tensor([data.encode(k, data.PREFIX_LEN) for k in keys for _ in range(a.n)])
     torch.manual_seed(a.seed)
     out = m.generate(n=a.n, prefix=prefix, temperature=a.temperature, top_k=a.top_k, top_p=a.top_p, cfg=a.cfg,
-                     level_temps=_level_temps(a.level_temps))
+                     level_temps=_level_temps(a.level_temps), verify_levels=_level_set(a.verify),
+                     n_candidates=a.candidates)
     toks = out["tokens"]
     print(f"task={task}  levels(NFE)={out['nfe']}  T={a.temperature} top_k={a.top_k} top_p={a.top_p} cfg={a.cfg}")
     for i in range(toks.shape[0]):
@@ -67,6 +68,10 @@ def cmd_sample(a):
         if a.trace:
             for k, t in enumerate(out["trace"][:-1]):
                 print(f"      after level {k}: {data.decode(t[i])}")
+
+
+def _level_set(spec):
+    return tuple(int(t) for t in spec.split(",")) if spec else ()
 
 
 def _level_temps(spec):
@@ -96,7 +101,8 @@ def cmd_eval(a):
         prefixes = None
         if task == "cond":  # keywords drawn from held-out sentences
             prefixes = [data.keyword_prefix(test.sentences[i % len(test)]) for i in range(a.n)]
-        kw = {"cfg": a.cfg, "level_temps": _level_temps(a.level_temps)} if name == "NCM" else {}
+        kw = {"cfg": a.cfg, "level_temps": _level_temps(a.level_temps),
+              "verify_levels": _level_set(a.verify), "n_candidates": a.candidates} if name == "NCM" else {}
         texts, secs, nfe = _gen_texts(m, task, a.n, a.bs, prefixes, temperature=a.temperature, **kw)
         r = evaluate_texts(texts, train.sentences, prefixes)
         print(f"{name:<6}{task:<6}{nfe:>4}{r['valid']:8.3f}{r['novel_valid']:8.3f}{r['unique']:8.3f}"
@@ -142,6 +148,8 @@ def build():
     s.add_argument("--temperature", type=float, default=1.0); s.add_argument("--top-k", type=int, default=0)
     s.add_argument("--top-p", type=float, default=1.0); s.add_argument("--cfg", type=float, default=0.0)
     s.add_argument("--level-temps", default=None, help='per-level temperature, e.g. "1,1,0,0,0,0" (0 = argmax)')
+    s.add_argument("--verify", default=None, help='levels to cycle-verify, e.g. "1,2,3" (rejection sampling)')
+    s.add_argument("--candidates", type=int, default=8, help="candidates per verified level")
     s.add_argument("--trace", action="store_true", help="show the text decoded after each level")
 
     s = add("eval", cmd_eval, help="grammar-based quality + speed, NCM vs AR")
@@ -149,6 +157,8 @@ def build():
     s.add_argument("--bs", type=int, default=256); s.add_argument("--temperature", type=float, default=1.0)
     s.add_argument("--cfg", type=float, default=0.0)
     s.add_argument("--level-temps", default=None, help='per-level temperature, e.g. "1,1,0,0,0,0" (0 = argmax)')
+    s.add_argument("--verify", default=None, help='levels to cycle-verify, e.g. "1,2,3" (rejection sampling)')
+    s.add_argument("--candidates", type=int, default=8, help="candidates per verified level")
     return p
 
 

@@ -116,3 +116,12 @@ def test_alpha_one_equals_mean_of_level_losses():
     g = NextConceptGenerator(tiny_vq(), d_model=32, layers=1, heads=2, alpha=1.0).eval()
     out = g(data.load_splits("lm")[0].batch(8)[0])
     assert torch.allclose(out["loss"], out["per_level"].mean(), atol=1e-6)
+
+
+def test_cycle_verification_runs_and_keeps_pass_count():
+    g = NextConceptGenerator(tiny_vq(), d_model=32, layers=1, heads=2).eval()
+    calls = []
+    g.tf.register_forward_hook(lambda *a: calls.append(1))
+    out = g.generate(n=4, verify_levels=(1, 2, 3), n_candidates=4)
+    assert out["tokens"].shape == (4, data.SEQ_LEN) and len(calls) == 6   # extra work is tokenizer-only
+    assert [c.shape[1] for c in out["codes"]] == [1, 2, 4, 8, 16, 32]
