@@ -39,7 +39,8 @@ def test_vq_pyramid_and_partial_recon():
 
 
 def test_generator_mask_is_block_causal():
-    g = NextConceptGenerator(tiny_vq(), d_model=32, layers=1, heads=2, prefix_len=4, vocab=data.VOCAB)
+    g = NextConceptGenerator(tiny_vq(), d_model=32, layers=1, heads=2, prefix_len=4, vocab=data.VOCAB,
+                             attn="block_causal")
     P, mask, lvl = 4, g.mask, g.lvl_of
     assert mask[:P, P:].all() and not mask[:P, :P].any()          # prefix sees only prefix
     assert not mask[P:, :P].any()                                 # targets see the prefix
@@ -63,7 +64,7 @@ def test_generator_train_and_generate_use_one_pass_per_level():
 
 def test_teacher_forcing_matches_sampling_inputs():
     """Level-k logits must not depend on tokens of finer levels (causality sanity check)."""
-    g = NextConceptGenerator(tiny_vq(), d_model=32, layers=1, heads=2).eval()
+    g = NextConceptGenerator(tiny_vq(), d_model=32, layers=1, heads=2, attn="block_causal").eval()
     x = data.load_splits("lm")[0].batch(4)[0]
     _, hats = g.vq_model.encode(x)
     with torch.no_grad():
@@ -77,3 +78,41 @@ def test_ar_baseline_nfe_and_sampling():
     assert m.generate(n=3)["nfe"] == data.SEQ_LEN
     assert sample_logits(torch.tensor([[0.0, 5.0, 1.0]]), temperature=0).item() == 1
     assert sample_logits(torch.tensor([[0.0, 5.0, 1.0]]), top_k=1).item() == 1
+
+
+def test_block_diagonal_mask_and_single_block_equivalence():
+    """Sampling processes one level block at a time; that must equal the full training-time pass."""
+    g = NextConceptGenerator(tiny_vq(), d_model=32, layers=1, heads=2, prefix_len=data.PREFIX_LEN,
+                             vocab=data.VOCAB).eval()
+    P, lvl = data.PREFIX_LEN, g.lvl_of
+    assert (g.mask[P:, P:] == (lvl[None, :] != lvl[:, None])).all() and not g.mask[P:, :P].any()
+    x = data.load_splits("cond")[0].batch(4)
+    idxs = g.vq_model.encode(x[0])[0]
+    hats = g.hats_from_codes(idxs)
+    with torch.no_grad():
+        full = g._run(g._target_inputs(hats, 4, 5), x[1])
+        for k in (0, 3, 5):
+            blk = g._block_input(hats, 4, k)
+            h = g._run(blk, x[1], g._local_mask(blk.shape[1], blk.device))
+            assert torch.allclose(g.heads_out[k](h), g._level_logits(full, k), atol=1e-4)
+
+
+def test_corruption_changes_inputs_not_targets_and_is_train_only():
+    vq = tiny_vq()
+    g = NextConceptGenerator(vq, d_model=32, layers=1, heads=2, corrupt_mean=0.5)
+    rates = g.corruption_rates()
+    assert len(rates) == 5 and rates[0] > rates[-1] and abs(sum(rates) / 5 - 0.5) < 1e-6
+    x = data.load_splits("lm")[0].batch(64)[0]
+    idxs = g.encode_codes(x)
+    clean = g.hats_from_codes(idxs, corrupt=False)
+    assert not torch.allclose(clean[0], g.hats_from_codes(idxs, corrupt=True)[0])
+    g.eval()
+    a, b = g(idxs=idxs)["loss"], g(idxs=idxs)["loss"]
+    assert torch.allclose(a, b)                                   # no corruption at eval time
+    g.train(); g(idxs=idxs)["loss"].backward()
+
+
+def test_alpha_one_equals_mean_of_level_losses():
+    g = NextConceptGenerator(tiny_vq(), d_model=32, layers=1, heads=2, alpha=1.0).eval()
+    out = g(data.load_splits("lm")[0].batch(8)[0])
+    assert torch.allclose(out["loss"], out["per_level"].mean(), atol=1e-6)

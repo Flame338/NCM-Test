@@ -110,8 +110,8 @@ class MultiScaleResidualVQ(nn.Module):
         return dict(hats=hats, idxs=idxs, loss=loss, perplexity=torch.stack(ppl))
 
 
-def _tf(d, layers, heads):
-    layer = nn.TransformerEncoderLayer(d, heads, 4 * d, dropout=0.0, activation="gelu",
+def _tf(d, layers, heads, dropout=0.0):
+    layer = nn.TransformerEncoderLayer(d, heads, 4 * d, dropout=dropout, activation="gelu",
                                        batch_first=True, norm_first=True)
     return nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
 

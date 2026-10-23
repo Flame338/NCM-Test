@@ -82,12 +82,13 @@ def train_gen(vq_path, out, task="lm", steps=3000, bs=128, lr=1e-3, seed=0, log_
     vq = load_vq(vq_path)
     P = train.p.shape[1]
     model = NextConceptGenerator(vq, prefix_len=P, vocab=data.VOCAB, **model_kw)
-    print(f"NCM generator ({task}) trainable params: {n_params(model):,}")
+    print(f"NCM generator ({task}) trainable params: {n_params(model):,}  cfg={model.cfg}")
+    codes = model.encode_codes(train.x)  # tokenizer is frozen: encode the training set once
     gen = torch.Generator().manual_seed(seed)
 
     def step():
-        x, p = train.batch(bs, gen)
-        r = model(x, p if P else None)
+        i = torch.randint(0, len(train), (bs,), generator=gen)
+        r = model(prefix=train.p[i] if P else None, idxs=[c[i] for c in codes])
         return dict(loss=r["loss"], ce=r["per_level"], acc=r["acc"])
 
     _loop(model, model.trainable_parameters(), step, steps, lr, log_every, f"ncm-{task}")
@@ -98,7 +99,8 @@ def train_gen(vq_path, out, task="lm", steps=3000, bs=128, lr=1e-3, seed=0, log_
 def load_gen(path):
     ck = torch.load(path, map_location="cpu")
     vq = TextVQVAE(**ck["meta"]["vq_cfg"])
-    m = NextConceptGenerator(vq, **ck["cfg"]); m.load_state_dict(ck["state"])
+    cfg = {"attn": "block_causal", **ck["cfg"]}  # checkpoints from before the attn option were block-causal
+    m = NextConceptGenerator(vq, **cfg); m.load_state_dict(ck["state"])
     return m.eval(), ck["meta"]["task"]
 
 

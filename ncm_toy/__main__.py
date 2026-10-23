@@ -17,7 +17,8 @@ def cmd_train_vq(a):
 
 
 def cmd_train_gen(a):
-    T.train_gen(a.vq, a.out, task=a.task, steps=a.steps, bs=a.bs, lr=a.lr, seed=a.seed)
+    T.train_gen(a.vq, a.out, task=a.task, steps=a.steps, bs=a.bs, lr=a.lr, seed=a.seed,
+                attn=a.attn, corrupt_mean=a.corrupt, alpha=a.alpha, dropout=a.dropout)
 
 
 def cmd_train_ar(a):
@@ -112,6 +113,10 @@ def build():
     s.add_argument("--task", choices=["lm", "cond"], default="lm"); s.add_argument("--vq", default=f"{CK}/vq.pt")
     s.add_argument("--out", default=None); s.add_argument("--steps", type=int, default=3000)
     s.add_argument("--bs", type=int, default=128); s.add_argument("--lr", type=float, default=1e-3)
+    s.add_argument("--attn", choices=["block_diagonal", "block_causal"], default="block_diagonal")
+    s.add_argument("--corrupt", type=float, default=0.0, help="mean conditioning-corruption rate (paper uses ~0.5)")
+    s.add_argument("--alpha", type=float, default=1.0, help="loss weight exponent: 0 per-code, 1 per-level")
+    s.add_argument("--dropout", type=float, default=0.0)
 
     s = add("train-ar", cmd_train_ar, help="autoregressive baseline")
     s.add_argument("--task", choices=["lm", "cond"], default="lm"); s.add_argument("--out", default=None)
