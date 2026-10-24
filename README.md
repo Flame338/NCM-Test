@@ -54,7 +54,7 @@ Two tasks: `lm` (unconditional) and `cond` (keywords → sentence, with CFG).
 
 ```bash
 pip install torch numpy pytest
-python -m pytest -q                                   # 7 fast tests
+python -m pytest -q                                   # 11 fast tests
 
 # pretrained toy checkpoints are in checkpoints/ — play right away:
 python -m ncm_toy recon                               # how much do the first k levels recover?
