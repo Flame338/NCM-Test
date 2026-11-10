@@ -5,11 +5,6 @@ A small, CPU-friendly re-implementation of the core idea of **Next-Concept Model
 [reference code](https://github.com/HazyResearch/ncm)) for experimenting with the mechanism —
 not for reproducing the paper's numbers.
 
-> **Provenance.** The first version was built from the public reference repo and secondary summaries because
-> `arxiv.org` was unreachable. I later read the paper PDF and compared it with this code (Sec. 3, App. C and F).
-> The section "Closing the accuracy gap" below records what that comparison changed and what did not work.
-> This is still a small re-implementation, not a reproduction: details marked *(toy)* are my simplifications.
-
 ## The idea in one picture
 
 Autoregressive LMs emit one token per forward pass. Diffusion LMs emit many tokens per pass but need many passes.
